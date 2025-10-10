@@ -37,11 +37,14 @@ async function run() {
     }
 
     // const page = await BrowserPage.getInstance();
-    const browser = await puppeteer.launch({ headless: true }); // true:not show browser
+    // const browser = await puppeteer.launch({ headless: false }); // true:not show browser
+    const browser = await puppeteer.connect({
+        browserURL: 'http://127.0.0.1:9222', // 连接本地已启动的Chrome实例
+        });
     const page = await browser.newPage();
 
     // 检查是否存在 cookie 文件
-    await autoLogin(page)
+    // await autoLogin(page)
     console.log(color.green("Login successfully!"))
     console.log()
 
