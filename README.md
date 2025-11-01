@@ -1,3 +1,6 @@
+## 介绍
+本仓库基于 `renyunkang/yuque-exporter` 进行修改，实现语雀知识库的本地导出或通过 Github Actions 自动同步至 Github 仓库
+
 ## 方案一：本地导出
 由于语雀登录时进行人机校验，所以改为手动登录，复用现有 Chrome 登录会话
 
