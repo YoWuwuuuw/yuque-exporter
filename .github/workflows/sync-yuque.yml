@@ -1,0 +1,248 @@
+name: 同步语雀笔记
+
+on:
+  schedule:
+    # 每月1号凌晨2点执行（UTC时间，对应北京时间10点）
+    - cron: '0 2 1 * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要写权限来创建分支和推送代码
+      pull-requests: write  # 需要写权限来创建 PR
+    
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史记录
+    
+      - name: 配置 Git
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+    
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+    
+      - name: 安装系统依赖（Puppeteer 所需）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libatk1.0-0 \
+            libc6 \
+            libcairo2 \
+            libcups2 \
+            libdbus-1-3 \
+            libexpat1 \
+            libfontconfig1 \
+            libgcc-s1 \
+            libgdk-pixbuf-2.0-0 \
+            libglib2.0-0 \
+            libgtk-3-0 \
+            libnspr4 \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            libstdc++6 \
+            libx11-6 \
+            libx11-xcb1 \
+            libxcb1 \
+            libxcomposite1 \
+            libxcursor1 \
+            libxdamage1 \
+            libxext6 \
+            libxfixes3 \
+            libxi6 \
+            libxrandr2 \
+            libxrender1 \
+            libxss1 \
+            libxtst6 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            ca-certificates \
+            fonts-liberation \
+            libappindicator3-1 \
+            xdg-utils \
+            wget \
+            gnupg
+    
+      - name: 克隆 yuque-exporter 项目
+        run: |
+          cd ${{ runner.temp }}
+          git clone https://github.com/YoWuwuuuw/yuque-exporter.git
+    
+      - name: 安装 yuque-exporter 依赖
+        run: |
+          cd ${{ runner.temp }}/yuque-exporter
+          npm install
+          # 验证 Puppeteer 是否正确安装了 Chromium
+          echo "检查 Puppeteer Chromium 路径..."
+          node -e "const puppeteer = require('puppeteer'); console.log('Puppeteer 可执行路径:', puppeteer.executablePath());" || echo "⚠️ 无法获取 Chromium 路径，将在运行时自动下载"
+    
+      - name: 恢复 cookies.json 文件
+        run: |
+          cd ${{ runner.temp }}/yuque-exporter
+          if [ -z "${{ secrets.YUQUE_COOKIES }}" ]; then
+            echo "❌ 错误: 未找到 YUQUE_COOKIES secret，请先在 GitHub Secrets 中配置"
+            exit 1
+          fi
+          echo '${{ secrets.YUQUE_COOKIES }}' > cookies.json
+          echo "✅ Cookies 已恢复"
+    
+      - name: 创建 CI 专用启动脚本
+        run: |
+          cd ${{ runner.temp }}/yuque-exporter
+          cat > main-ci.js << 'EOF'
+          import puppeteer from 'puppeteer';
+          import fs from 'fs';
+          import path from 'path';
+          import { getAllBooks } from './src/toc.js';
+          import { exportMarkDownFiles } from './src/export.js';
+
+          let color = {
+              byNum: (mess, fgNum) => {
+                  mess = mess || '';
+                  fgNum = fgNum === undefined ? 31 : fgNum;
+                  return '\u001b[' + fgNum + 'm' + mess + '\u001b[39m';
+              },
+              black: (mess) => color.byNum(mess, 30),
+              red: (mess) => color.byNum(mess, 31),
+              green: (mess) => color.byNum(mess, 32),
+              yellow: (mess) => color.byNum(mess, 33),
+              blue: (mess) => color.byNum(mess, 34),
+              magenta: (mess) => color.byNum(mess, 35),
+              cyan: (mess) => color.byNum(mess, 36),
+              white: (mess) => color.byNum(mess, 37)
+          };
+
+          async function run() {
+              let browser;
+              try {
+                  // 确保导出路径存在
+                  const exportPath = process.env.EXPORT_PATH || path.join(process.cwd(), 'output');
+                  if (!fs.existsSync(exportPath)) {
+                      console.log(`创建导出目录: ${exportPath}`);
+                      fs.mkdirSync(exportPath, { recursive: true });
+                  }
+                  process.env.EXPORT_PATH = exportPath;
+                  console.log(`导出路径: ${exportPath}`);
+
+                  // 使用 puppeteer.launch 启动浏览器（CI 环境）
+                  // 注意：Puppeteer 会自动下载 Chromium，无需手动安装 Chrome
+                  console.log('正在启动 Chromium 浏览器...');
+                  console.log('Chromium 路径:', puppeteer.executablePath());
+                  
+                  browser = await puppeteer.launch({
+                      headless: 'new',  // 使用新的 headless 模式
+                      args: [
+                          '--no-sandbox',
+                          '--disable-setuid-sandbox',
+                          '--disable-dev-shm-usage',
+                          '--disable-accelerated-2d-canvas',
+                          '--no-first-run',
+                          '--no-zygote',
+                          '--disable-gpu'
+                      ]
+                  });
+                  console.log('✅ Chromium 浏览器启动成功');
+                  const page = await browser.newPage();
+
+                  // 使用 cookies 登录
+                  const cookieFile = './cookies.json';
+                  if (!fs.existsSync(cookieFile)) {
+                      throw new Error('cookies.json 文件不存在，请确保已配置 YUQUE_COOKIES secret');
+                  }
+                  
+                  const cookies = JSON.parse(fs.readFileSync(cookieFile));
+                  const cleanCookies = cookies.map(c => ({
+                      name: c.name,
+                      value: c.value,
+                      domain: c.domain || '.yuque.com',
+                      path: c.path || '/',
+                      ...(c.expires > 0 && { expires: c.expires }),
+                      ...(c.httpOnly !== undefined && { httpOnly: c.httpOnly }),
+                      ...(c.secure !== undefined && { secure: c.secure }),
+                      ...(c.sameSite && { sameSite: c.sameSite })
+                  }));
+                  
+                  await page.goto('https://www.yuque.com');
+                  for (const cookie of cleanCookies) {
+                      try {
+                          await page.setCookie(cookie);
+                      } catch (err) {
+                          // 忽略单个 cookie 设置失败
+                      }
+                  }
+                  await page.goto('https://www.yuque.com/dashboard');
+                  console.log(color.green("✅ Cookies 登录成功"))
+                  console.log()
+
+                  console.log("Get book stacks ...")
+                  const books = await getAllBooks(page)
+
+                  console.log("Start export all books ...")
+                  await exportMarkDownFiles(page, books)
+
+                  console.log(color.green("✅ 导出完成！"))
+              } catch (error) {
+                  console.error(color.red("❌ 发生错误:"), error);
+                  throw error;
+              } finally {
+                  if (browser) {
+                      await browser.close();
+                      console.log('浏览器已关闭');
+                  }
+              }
+          };
+
+          run();
+          EOF
+    
+      - name: 创建导出目录
+        run: |
+          mkdir -p ${{ runner.temp }}/yuque-output
+          echo "导出目录已创建: ${{ runner.temp }}/yuque-output"
+    
+      - name: 运行导出脚本
+        env:
+          EXPORT_PATH: ${{ runner.temp }}/yuque-output
+        run: |
+          cd ${{ runner.temp }}/yuque-exporter
+          node main-ci.js
+    
+      - name: 复制导出的文件到仓库
+        run: |
+          rsync -av --exclude='.git' --exclude='.github' ${{ runner.temp }}/yuque-output/ ${{ github.workspace }}/
+    
+      - name: 生成时间戳
+        id: timestamp
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+          echo "✅ 时间戳: $TIMESTAMP"
+    
+      - name: 创建 Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "自动同步语雀笔记 - ${{ steps.timestamp.outputs.timestamp }}"
+          title: "同步笔记 ${{ steps.timestamp.outputs.timestamp }}"
+          body: |
+            🤖 自动同步语雀笔记
+            
+            - 同步时间: ${{ steps.timestamp.outputs.timestamp }}
+            - 运行次数: #${{ github.run_number }}
+            - 触发方式: ${{ github.event_name }}
+            
+            > 请检查更改后合并此 PR
+          branch: sync-yuque-${{ steps.timestamp.outputs.timestamp }}
+          delete-branch: true
+
